@@ -6,6 +6,7 @@
  * Gavin Ridley
  * 22.212 F2019
  */
+#include <algorithm>
 #include <iostream>
 #include <experimental/filesystem>
 #include <fstream>
@@ -262,11 +263,42 @@ unsigned FiniteMaterialSet::getMaterialCount(string libname)
   return nmaterials;
 }
 
-// OK, here is the unique code for my Sn solver. It's quite simple!
+// OK, here is the code for my Sn solver. It's quite simple!
 class Solver2D
 {
-  vector<float> fluxes;
+  vector<float> fluxes; // scalar flux
+  vector<float> source; // isotropic cell source
+
+  // Only one angular flux array is stored at a time
+  vector<float> ang_flux;
+
+  // Cell edge fluxes for the next row or column in the iteration
+  vector<float> edge_fluxes;
+
+  SquarePinGeom geom;
+  RunSettings settings;
+
+  unsigned ngroups;
+  unsigned mesh_dimx;
+
+  public:
+    Solver2D(SquarePinGeom geom_a, RunSettings settings_a);
+    void zeroScalarFlux();
+    void zeroAngularFlux();
 }
+Solver2D::Solver2D(SquarePinGeom geom_a, RunSettings settings_a) :
+  geom(geom_a),
+  settings(settings_a),
+  ngroups(settings.ngroups),
+  mesh_dimx(settings.mesh_dimx),
+  fluxes(mesh_dimx * mesh_dimx * ngroups),
+  source(fluxes.size()),
+  ang_flux(fluxes.size()),
+  edge_fluxes(ngroups * mesh_dimx)
+{
+}
+void Solver2D::zeroScalarFlux() { fill(fluxes.begin(), fluxes.end(), 0.0f) };
+void Solver2D::zeroAngularFlux() { fill(ang_flux.begin(), ang_flux.end(), 0.0f) };
 
 int main()
 {
