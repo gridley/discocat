@@ -14,6 +14,8 @@
 #include <vector>
 using namespace std; // I love cluttered namespaces!
 
+#include "lsquadrature.h"
+
 // --- A geometry class for the pedagogical fuel assembly in 22.212 ---
 // This has been stripped down from my previous random ray solver.
 // (S_n is easier than random ray IMO, why are we doing this second?)

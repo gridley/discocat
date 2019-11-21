@@ -6,61 +6,84 @@ import numpy.linalg as lin
 import scipy.optimize
 from mpl_toolkits.mplot3d import Axes3D
 import itertools
+from textwrap import wrap
+
+# helper to wrap in C++ initializer syntax
+def wrapCurly(ll):
+    lls = [str(s) for s in ll]
+    return '\n'.join(wrap('{' + ', '.join(lls) + '}'))
 
 class LevelSymmetricQuadrature:
+    '''
+    This class defines symmetry relations required for pointwise weights
+    on a quadrature set, and provides a plotting utility.
+    '''
 
-    # This class defines symmetry relations required for pointwise weights
-    # on a quadrature set, and provides a plotting utility.
 
-    # Level weight to point weight matrices (these may be singular!)
-    symmetry_matrices = {
-    2:      [[1.0]],
+    def generate_symmetry_dict(self):
+        '''
+        Generates a dictionary that maps i,j,k indices of the
+        quadrature to its enumerated group that tells which
+        rays must have the same weight in order to maintain
+        symmetry about all 90 deg rotations
+        '''
 
-    4:      [[2.0, 0.0],
-             [1.0, 0.0]],
+        if self.ptweight_dict:
+            return
 
-    6:      [[2.0, 1.0],
-             [0.0, 2.0],
-             [1.0, 0.0]],
+        symm_group = 0
+        for i in range(self.n_2):
+            for j in range(self.n_2-i):
+                k = self.n_2-i-j-1
 
-    8:      [[2.0, 2.0, 0.0],
-             [0.0, 2.0, 1.0],
-             [0.0, 2.0, 0.0],
-             [1.0, 0.0, 0.0]],
+                # Update dictionary of point weights
+                # Each different point weight corresponds to a group
+                # of permuations of the indices. This comes from the
+                # symmetry condition on point weights.
+                if (i, j, k) not in self.ptweight_dict:
+                    newkeys = itertools.permutations((i,j,k))
+                    for newkey in newkeys:
+                        self.ptweight_dict[newkey] = symm_group
+                    symm_group += 1
 
-    10:      [[2.0, 2.0, 1.0, 0.0],
-              [0.0, 2.0, 0.0, 2.0],
-              [0.0, 0.0, 2.0, 1.0],
-              [0.0, 2.0, 0.0, 0.0],
-              [1.0, 0.0, 0.0, 0.0]],
+    def gen_sym(self):
+        '''
+        Generates a singular matrix, which, if the RHS satisfied certain conditions, 
+        yields a system of equations where level weights are the RHS, and
+        the solution of this system gives a set of weights for each ray in
+        a symmetric group.
 
-    12:      [[2.0, 2.0, 2.0, 0.0, 0.0],
-              [0.0, 2.0, 0.0, 2.0, 1.0],
-              [0.0, 0.0, 2.0, 0.0, 2.0],
-              [0.0, 0.0, 2.0, 1.0, 0.0],
-              [0.0, 2.0, 0.0, 0.0, 0.0],
-              [1.0, 0.0, 0.0, 0.0, 0.0]],
+        e.g.
+                         1
+           1            2 2
+          2 2          3 4 3
+         2 3 2        2 4 4 2
+        1 2 2 1      1 2 3 2 1
 
-    14:      [[2.0, 2.0, 2.0, 1.0, 0.0, 0.0, 0.0],
-              [0.0, 2.0, 0.0, 0.0, 2.0, 2.0, 0.0],
-              [0.0, 0.0, 2.0, 0.0, 0.0, 2.0, 1.0],
-              [0.0, 0.0, 0.0, 2.0, 0.0, 2.0, 0.0],
-              [0.0, 0.0, 2.0, 0.0, 1.0, 0.0, 0.0],
-              [0.0, 0.0,-1.0, 1.0, 1.0,-2.0, 1.0],
-              [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]],
+        are each equivalent to a certain matrix
+        '''
 
-    16:       [[2.0, 2.0, 2.0, 2.0, 0.0, 0.0, 0.0, 0.0],
-              [0.0, 2.0, 0.0, 0.0, 2.0, 0.0, 1.0, 0.0],
-              [0.0, 0.0, 2.0, 0.0, 0.0, 2.0, 0.0, 2.0],
-              [0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 2.0, 1.0],
-              [0.0, 0.0, 0.0, 2.0, 0.0, 2.0, 0.0, 0.0],
-              [0.0, 0.0, 2.0, 0.0, 1.0, 0.0, 0.0, 0.0],
-              [0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-              [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]]
-              #[0.0, 0.0, 1.0,-1.0,-1.0, 1.0, 1.0,-1.0]]
-    }
+        self.generate_symmetry_dict()
 
-    def plot(self):
+        ncols = max(self.ptweight_dict.values()) + 1
+        nrows = self.n_2
+
+        # Allocate matrix:
+        mat = np.zeros((nrows, ncols))
+
+        self.generate_symmetry_dict()
+        for i in range(self.n_2):
+            for j in range(self.n_2-i):
+                k = self.n_2-i-j-1
+                group = self.ptweight_dict[(i,j,k)]
+                mat[i, group] += 1.0
+        return mat
+
+    def plot(self, circles=False):
+
+        # Make sure symmetry dictionary is created:
+        self.generate_symmetry_dict()
+
         # Create a 3D plot of the quadrature
         fig = plt.figure()
         ax = fig.add_subplot(111, projection='3d')
@@ -74,26 +97,13 @@ class LevelSymmetricQuadrature:
         weights = np.zeros(npts) 
 
         pt = 0
-        ptweight_dict = {}
-        symm_group = 0
         for i in range(self.n_2):
             for j in range(self.n_2-i):
                 k = self.n_2-i-j-1
-
-                # Update dictionary of point weights
-                # Each different point weight corresponds to a group
-                # of permuations of the indices. This comes from the
-                # symmetry condition on point weights.
-                if (i, j, k) not in ptweight_dict:
-                    newkeys = itertools.permutations((i,j,k))
-                    for newkey in newkeys:
-                        ptweight_dict[newkey] = symm_group
-                    symm_group += 1
-
                 xvals[pt] = self.mus[i]
                 yvals[pt] = self.mus[j]
                 zvals[pt] = self.mus[k]
-                weights[pt] = self.point_weights[ptweight_dict[(i,j,k)]]
+                weights[pt] = self.point_weights[self.ptweight_dict[(i,j,k)]]
                 pt += 1
 
         # permute scatter plot over all octants
@@ -109,25 +119,26 @@ class LevelSymmetricQuadrature:
 
         # Plot some circles that intersect the points in order to exhibit the
         # unique nature of the level symmetric quadratures:
-        n_circ = 50 # points on the circle
-        phis = np.linspace(0.0, 2.0 * np.pi, n_circ)
-        for i in range(self.n_2):
-            xvals = np.zeros(n_circ)
-            yvals = np.zeros(n_circ)
-            zvals = np.zeros(n_circ)
-            j = 0
-            k = self.n_2-i-j-1
-            circ_radius = np.sqrt(self.mus[j]**2 + self.mus[k]**2)
-            for l in range(n_circ):
-                xvals[l] = np.abs(self.mus[i])
-                yvals[l] = circ_radius * np.cos(phis[l])
-                zvals[l] = circ_radius * np.sin(phis[l])
-            for sign in [-1, 1]:
-                ax.plot(sign * xvals, yvals, zvals, c='b', alpha=0.25)
-            for sign in [-1, 1]:
-                ax.plot(yvals, sign*xvals, zvals, c='b', alpha=0.25)
-            for sign in [-1, 1]:
-                ax.plot(yvals, zvals, sign*xvals, c='b', alpha=0.25)
+        if circles:
+            n_circ = 50 # points on the circle
+            phis = np.linspace(0.0, 2.0 * np.pi, n_circ)
+            for i in range(self.n_2):
+                xvals = np.zeros(n_circ)
+                yvals = np.zeros(n_circ)
+                zvals = np.zeros(n_circ)
+                j = 0
+                k = self.n_2-i-j-1
+                circ_radius = np.sqrt(self.mus[j]**2 + self.mus[k]**2)
+                for l in range(n_circ):
+                    xvals[l] = np.abs(self.mus[i])
+                    yvals[l] = circ_radius * np.cos(phis[l])
+                    zvals[l] = circ_radius * np.sin(phis[l])
+                for sign in [-1, 1]:
+                    ax.plot(sign * xvals, yvals, zvals, c='b', alpha=0.25)
+                for sign in [-1, 1]:
+                    ax.plot(yvals, sign*xvals, zvals, c='b', alpha=0.25)
+                for sign in [-1, 1]:
+                    ax.plot(yvals, zvals, sign*xvals, c='b', alpha=0.25)
 
         plt.show()
 
@@ -136,8 +147,26 @@ class LevelSymmetricQuadrature:
         n = self.n_2 * 2
         
         # Division by two here matches the normalization of the paper
-        mat_sym = np.array(LevelSymmetricQuadrature.symmetry_matrices[n]) / 2.0
+        mat_sym = self.gen_sym() / 2.0
         self.point_weights = np.matmul(lin.pinv(mat_sym),self.weights)
+
+    def toCpp(self):
+        # Prints out a template specialization of my LevelSymmetricQuadrature class
+        # that gives a nice, clean syntax.
+
+        retstr = """
+template<>
+LSQuadrature<%i>::LSQuadrature() :
+    mu(%s),
+    weights(%s),
+    point_weights(%s)
+{
+}
+""" % ( self.n_2 * 2,
+        wrapCurly(self.mus),
+        wrapCurly(self.weights),
+        wrapCurly(self.point_weights))
+        return retstr
 
 class EvenQuadrature(LevelSymmetricQuadrature):
     # Generates a level-symmetric S_n quadrature, given n
@@ -155,17 +184,20 @@ class EvenQuadrature(LevelSymmetricQuadrature):
         # avoid writing "self" a bunch
         n_2 = self.n_2
 
+        # empty point weight group dictionary
+        self.ptweight_dict = {}
+
         # solve for quadrature
         guess = np.zeros(n_2 + 1)
-        guess[0] = 0.10 # first cosine
+        guess[0] = .01 # first cosine
         guess[1:] = np.ones(n_2) / n_2 # equal weights
-        soln = scipy.optimize.root(self.residual, guess)
+        soln = scipy.optimize.root(self.residual, guess, method='anderson')
 
         if not soln.success:
             raise Exception('Failed to find quadrature in nonlinear solve')
 
         self.mus = np.zeros(self.n_2)
-        self.mus[0] = soln.x[0]
+        self.mus[0] = np.abs(soln.x[0])
         delta = 2.0 * (1.0 - 3.0 * self.mus[0]**2) / (2.0 * self.n_2 - 2.0)
         for i in range(1, self.n_2):
             self.mus[i] = np.sqrt(self.mus[i-1]**2 + delta)
@@ -193,8 +225,67 @@ class EvenQuadrature(LevelSymmetricQuadrature):
 
         return residual
 
-e4 = EvenQuadrature(12)
-print(e4.mus)
-print(e4.weights)
-print(e4.point_weights)
-e4.plot()
+class OddQuadrature(LevelSymmetricQuadrature):
+    # Generates a level-symmetric S_n quadrature, given n
+    # a quadrature which matches odd moments.
+
+    def __init__(self, n):
+        self.n_2 = int(n/2)
+
+        # avoid writing "self" a bunch
+        n_2 = self.n_2
+
+        # empty point weight group dictionary
+        self.ptweight_dict = {}
+
+        # solve for quadrature
+        guess = np.zeros(n_2 + 1)
+        guess[0] = .01 # first cosine
+        guess[1:] = np.ones(n_2) / n_2 # equal weights
+        soln = scipy.optimize.root(self.residual, guess, method='anderson')
+
+        if not soln.success:
+            raise Exception('Failed to find quadrature in nonlinear solve')
+
+        self.mus = np.zeros(self.n_2)
+        self.mus[0] = np.abs(soln.x[0])
+        delta = 2.0 * (1.0 - 3.0 * self.mus[0]**2) / (2.0 * self.n_2 - 2.0)
+        for i in range(1, self.n_2):
+            self.mus[i] = np.sqrt(self.mus[i-1]**2 + delta)
+        self.weights = soln.x[1:]
+
+        self.calcPointWeights()
+
+    def residual(self, unknowns):
+        # Unknowns are mu1, followed by the weights.
+        mu1 = unknowns[0]
+        weights = unknowns[1:]
+
+        # Create residual
+        residual = np.zeros(self.n_2+1)
+
+        # Calculate mu values
+        delta = 2.0 * (1.0 - 3.0 * mu1**2) / (2.0 * self.n_2 - 2.0)
+        mus = np.zeros(self.n_2)
+        mus[0] = mu1
+        for i in range(1, self.n_2):
+            mus[i] = np.sqrt(mus[i-1]**2 + delta)
+
+        for i in range(self.n_2+1):
+            residual[i] = 2.0 * np.dot(weights, mus**i) - 1.0/(i + 1)
+
+        return residual
+
+
+
+# for i in range(2, 40, 2):
+#     even = EvenQuadrature(i)
+#     odd = OddQuadrature(i)
+
+# print(q.gen_sym())
+# print(q.gen_sym())
+q = EvenQuadrature(50)
+q.plot()
+# for i in LevelSymmetricQuadrature.symmetry_matrices.keys():
+#     q = EvenQuadrature(i)
+#     print(q.toCpp())
