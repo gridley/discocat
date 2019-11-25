@@ -1,0 +1,6 @@
+xslibrary xslib1g
+mesh_dimx 27
+ngroups 1
+s_n 4
+quadrature_type EVEN
+maxiter 2000

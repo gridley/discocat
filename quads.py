@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# This generates level-symmetric quadratures for an S_n solver
+# that match those obtained by Lathrop and Carlson.
+#
+# Note:
 # How do we know that the solution to these nonlinear equations is unique?
 import matplotlib.pyplot as plt
 import numpy as np
@@ -8,10 +12,12 @@ from mpl_toolkits.mplot3d import Axes3D
 import itertools
 from textwrap import wrap
 
+np.seterr(all='raise')
+
 # helper to wrap in C++ initializer syntax
 def wrapCurly(ll):
     lls = [str(s) for s in ll]
-    return '\n'.join(wrap('{' + ', '.join(lls) + '}'))
+    return '\n      '.join(wrap('{' + ', '.join(lls) + '}'))
 
 class LevelSymmetricQuadrature:
     '''
@@ -44,6 +50,7 @@ class LevelSymmetricQuadrature:
                     newkeys = itertools.permutations((i,j,k))
                     for newkey in newkeys:
                         self.ptweight_dict[newkey] = symm_group
+                    self.max_symm_group = symm_group
                     symm_group += 1
 
     def gen_sym(self):
@@ -141,8 +148,7 @@ class LevelSymmetricQuadrature:
                     ax.plot(yvals, zvals, sign*xvals, c='b', alpha=0.25)
 
         plt.show()
-
-    def calcPointWeights(self):
+    def calcPointWeights(self, sum4pi=False):
         # assumes that self.mus and self.weights have already been calculated
         n = self.n_2 * 2
         
@@ -150,19 +156,24 @@ class LevelSymmetricQuadrature:
         mat_sym = self.gen_sym() / 2.0
         self.point_weights = np.matmul(lin.pinv(mat_sym),self.weights)
 
+        if sum4pi:
+            # Get count of 
+            tot_weight = np.sum(self.point_weights)
+            self.point_weights *= 4.0 * np.pi / tot_weight / (n * (n+2))
+
     def toCpp(self):
         # Prints out a template specialization of my LevelSymmetricQuadrature class
         # that gives a nice, clean syntax.
 
         retstr = """
-template<>
-LSQuadrature<%i>::LSQuadrature() :
-    mu(%s),
-    weights(%s),
-    point_weights(%s)
-{
-}
+  else if (na == %i and ma == %s)
+  {
+    mu = %s;
+    weights = %s;
+    point_weights = %s;
+  }
 """ % ( self.n_2 * 2,
+        self.type,
         wrapCurly(self.mus),
         wrapCurly(self.weights),
         wrapCurly(self.point_weights))
@@ -178,7 +189,8 @@ class EvenQuadrature(LevelSymmetricQuadrature):
     # This then feeds into a linear system for the weights,
     # which arises from symmetry considerations on levels.
 
-    def __init__(self, n):
+    def __init__(self, n, sum4pi=False):
+        self.type = 'EVEN'
         self.n_2 = int(n/2)
 
         # avoid writing "self" a bunch
@@ -189,9 +201,18 @@ class EvenQuadrature(LevelSymmetricQuadrature):
 
         # solve for quadrature
         guess = np.zeros(n_2 + 1)
-        guess[0] = .01 # first cosine
         guess[1:] = np.ones(n_2) / n_2 # equal weights
-        soln = scipy.optimize.root(self.residual, guess, method='anderson')
+
+        
+        while True:
+            try:
+                guess[0] = 0.5 * np.random.rand(1)[0]
+                soln = scipy.optimize.root(self.residual, guess, method='anderson')
+                if not soln.success:
+                    continue
+                break
+            except:
+                pass
 
         if not soln.success:
             raise Exception('Failed to find quadrature in nonlinear solve')
@@ -203,7 +224,7 @@ class EvenQuadrature(LevelSymmetricQuadrature):
             self.mus[i] = np.sqrt(self.mus[i-1]**2 + delta)
         self.weights = soln.x[1:]
 
-        self.calcPointWeights()
+        self.calcPointWeights(sum4pi=sum4pi)
 
     def residual(self, unknowns):
         # Unknowns are mu1, followed by the weights.
@@ -229,7 +250,8 @@ class OddQuadrature(LevelSymmetricQuadrature):
     # Generates a level-symmetric S_n quadrature, given n
     # a quadrature which matches odd moments.
 
-    def __init__(self, n):
+    def __init__(self, n, sum4pi=False):
+        self.type = 'ODD'
         self.n_2 = int(n/2)
 
         # avoid writing "self" a bunch
@@ -240,9 +262,15 @@ class OddQuadrature(LevelSymmetricQuadrature):
 
         # solve for quadrature
         guess = np.zeros(n_2 + 1)
-        guess[0] = .01 # first cosine
         guess[1:] = np.ones(n_2) / n_2 # equal weights
-        soln = scipy.optimize.root(self.residual, guess, method='anderson')
+
+        while True:
+            try:
+                guess[0] = 0.5 * np.random.rand(1)[0]
+                soln = scipy.optimize.root(self.residual, guess, method='anderson')
+                break
+            except:
+                pass
 
         if not soln.success:
             raise Exception('Failed to find quadrature in nonlinear solve')
@@ -254,7 +282,7 @@ class OddQuadrature(LevelSymmetricQuadrature):
             self.mus[i] = np.sqrt(self.mus[i-1]**2 + delta)
         self.weights = soln.x[1:]
 
-        self.calcPointWeights()
+        self.calcPointWeights(sum4pi=sum4pi)
 
     def residual(self, unknowns):
         # Unknowns are mu1, followed by the weights.
@@ -276,16 +304,15 @@ class OddQuadrature(LevelSymmetricQuadrature):
 
         return residual
 
-
-
-# for i in range(2, 40, 2):
-#     even = EvenQuadrature(i)
-#     odd = OddQuadrature(i)
+# for i in range(4, 30, 2):
+#     even = EvenQuadrature(i)#, sum4pi=True)
+#     odd = OddQuadrature(i)#, sum4pi=True)
+#     print(even.toCpp())
+#     print(odd.toCpp())
 
 # print(q.gen_sym())
 # print(q.gen_sym())
-q = EvenQuadrature(50)
+q = EvenQuadrature(4, sum4pi=True)
+# print(q.toCpp())
+# print(q.toCpp())
 q.plot()
-# for i in LevelSymmetricQuadrature.symmetry_matrices.keys():
-#     q = EvenQuadrature(i)
-#     print(q.toCpp())

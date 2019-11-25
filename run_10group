@@ -1,0 +1,6 @@
+xslibrary xslib10g
+mesh_dimx 99
+ngroups 10
+s_n 8
+quadrature_type EVEN
+maxiter 3000

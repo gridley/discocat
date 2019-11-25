@@ -12,13 +12,17 @@
 #include <fstream>
 #include <string>
 #include <vector>
-using namespace std; // I love cluttered namespaces!
-
+#include <map>
+#include <cmath>
 #include "lsquadrature.h"
+using namespace std; // I love cluttered namespaces!
+namespace fs = experimental::filesystem;
+
+constexpr float EPS = 1e-8f;
+constexpr float PI4 = M_PI * 4.0f;
 
 // --- A geometry class for the pedagogical fuel assembly in 22.212 ---
 // This has been stripped down from my previous random ray solver.
-// (S_n is easier than random ray IMO, why are we doing this second?)
 struct SquarePinGeom
 {
   unsigned mesh_dimx;
@@ -84,8 +88,12 @@ struct RunSettings
   string xslibrary;
   unsigned mesh_dimx;
   unsigned ngroups;
+  unsigned s_n;
+  unsigned maxiter;
+  string quadrature_type;
 
   public:
+    MomType quadType();
     RunSettings(string inputfile);
 };
 RunSettings::RunSettings(string inputfile)
@@ -100,8 +108,26 @@ RunSettings::RunSettings(string inputfile)
       instream >> mesh_dimx;
     else if (word == "ngroups")
       instream >> ngroups;
+    else if (word == "s_n")
+      instream >> s_n;
+    else if (word == "quadrature_type")
+      instream >> quadrature_type;
+    else if (word == "maxiter")
+      instream >> maxiter;
   }
   instream.close();
+}
+MomType RunSettings::quadType()
+{
+  if (quadrature_type == "ODD")
+    return ODD;
+  else if (quadrature_type == "EVEN")
+    return EVEN;
+  else
+  {
+    cerr << "unrecognized quadrature_type" << endl;
+    exit(1);
+  }
 }
 
 // Holds all of the macroscopic cross sections needed for a steady-state flux solution
@@ -265,44 +291,367 @@ unsigned FiniteMaterialSet::getMaterialCount(string libname)
   return nmaterials;
 }
 
-// OK, here is the code for my Sn solver. It's quite simple!
+// OK, here is the code for my Sn solver
 class Solver2D
 {
+  RunSettings settings;
+  SquarePinGeom geom;
+  LSQuadrature quad;
+  FiniteMaterialSet materialSet;
+
+  unsigned noct; // angular unknowns per octant
+  unsigned ngroups;
+  unsigned mesh_dimx;
+  unsigned stride; // stride in boundary array between different rays
+  float dx; // mesh spacing
   vector<float> fluxes; // scalar flux
   vector<float> source; // isotropic cell source
 
-  // Only one angular flux array is stored at a time
-  vector<float> ang_flux;
+  // boundary fluxes
+  vector<float> left_fluxes_fwd; // eta > 0
+  vector<float> left_fluxes_bwd; // eta < 0
+  vector<float> bottom_fluxes_fwd; // mu > 0
+  vector<float> bottom_fluxes_bwd; // mu < 0
+  vector<float> top_fluxes_fwd; // mu > 0
+  vector<float> top_fluxes_bwd; // mu < 0
+  vector<float> right_fluxes_fwd; // eta > 0
+  vector<float> right_fluxes_bwd; // eta < 0
 
-  // Cell edge fluxes for the next row or column in the iteration
-  vector<float> edge_fluxes;
-
-  SquarePinGeom geom;
-  RunSettings settings;
-
-  unsigned ngroups;
-  unsigned mesh_dimx;
+  // Core S_n kernel
+  void processCell(unsigned row, unsigned col,
+                   Ray ray,
+                   vector<float>& side_from,
+                   vector<float>& vert_from);
 
   public:
-    Solver2D(SquarePinGeom geom_a, RunSettings settings_a);
+    Solver2D(RunSettings settings_a);
+
     void zeroScalarFlux();
-    void zeroAngularFlux();
-}
-Solver2D::Solver2D(SquarePinGeom geom_a, RunSettings settings_a) :
-  geom(geom_a),
+
+    // Sets the source in a group-cell index
+    void setSource(unsigned indx, float src);
+
+     // Single fixed source sweep, return true if converged
+    void sweepSource();
+
+    // Result saving methods
+    void dumpFluxes(string fname);
+
+    // Calculate scattering source and add to source
+    void scatter();
+
+    // Calculate fission source, and add to source. Returns integral
+    // fission source
+    float fission(float k);
+
+    // guess a flat flux
+    void setFlatFlux();
+
+    void zeroSource();
+};
+Solver2D::Solver2D(RunSettings settings_a) :
   settings(settings_a),
+  geom(settings.mesh_dimx),
+  quad(settings.s_n, settings.quadType()),
+  materialSet(settings.xslibrary, settings.ngroups),
+  noct(quad.nOct()),
   ngroups(settings.ngroups),
   mesh_dimx(settings.mesh_dimx),
+  stride(mesh_dimx * ngroups),
+  dx(geom.assembly_width / mesh_dimx),
   fluxes(mesh_dimx * mesh_dimx * ngroups),
   source(fluxes.size()),
-  ang_flux(fluxes.size()),
-  edge_fluxes(ngroups * mesh_dimx)
+  left_fluxes_fwd(stride * noct),
+  left_fluxes_bwd(stride * noct),
+  bottom_fluxes_fwd(stride * noct),
+  bottom_fluxes_bwd(stride * noct),
+  top_fluxes_fwd(stride * noct),
+  top_fluxes_bwd(stride * noct),
+  right_fluxes_fwd(stride * noct),
+  right_fluxes_bwd(stride * noct)
 {
 }
-void Solver2D::zeroScalarFlux() { fill(fluxes.begin(), fluxes.end(), 0.0f) };
-void Solver2D::zeroAngularFlux() { fill(ang_flux.begin(), ang_flux.end(), 0.0f) };
-
-int main()
+void Solver2D::zeroSource() { for (auto& x: source) x = 0.0f; }
+void Solver2D::setFlatFlux() { for (auto& x: fluxes) x = 1.0f; }
+void Solver2D::scatter()
 {
-  SquarePinGeom geom(9);
+  for (unsigned fsr=0; fsr<mesh_dimx*mesh_dimx; ++fsr)
+  {
+    string mat_name;
+    if (geom.inside_fuel(fsr))  
+      mat_name = "fuel";
+    else
+      mat_name = "mod";
+    const Material& mat = materialSet.getMaterial(mat_name);
+    const vector<float>& scatmat = mat.nuscat;
+    for (unsigned g=0; g<ngroups; ++g)
+    {
+      source[ngroups * fsr + g] = 0.0f;
+      for (unsigned gprime=0; gprime<ngroups; ++gprime)
+      {
+        source[ngroups * fsr + g] += 
+          scatmat[g*ngroups + gprime] * fluxes[ngroups * fsr + gprime] / PI4;
+      }
+    }
+  }
+} 
+float Solver2D::fission(float k)
+{
+  float fissionSource = 0.0;
+  for (unsigned fsr=0; fsr<mesh_dimx*mesh_dimx; ++fsr)
+  {
+    string mat_name;
+    if (geom.inside_fuel(fsr)) 
+      mat_name = "fuel";
+    else
+    {
+      mat_name = "mod";
+      continue;
+    }
+    const Material& mat = materialSet.getMaterial(mat_name); 
+    const vector<float>& nusigf = mat.nufiss;
+    const vector<float>& chi = mat.chi;
+    // NOTE could be done more efficiently
+    for (unsigned g=0; g<ngroups; ++g)
+    {
+      for (unsigned gprime=0; gprime<ngroups; ++gprime)
+      {
+        float this_fiss = chi[g] * fluxes[ngroups * fsr + gprime] * nusigf[gprime] / k;
+        source[ngroups * fsr + g] += this_fiss / PI4;
+        fissionSource += this_fiss;
+      }
+    }
+  }
+  return fissionSource;
+}
+void Solver2D::dumpFluxes(string fname)
+{
+  ofstream f(fname, ofstream::out);
+  for (auto flx : fluxes) f << flx << endl;
+  f.close();
+}
+void inline Solver2D::processCell(unsigned row, unsigned col,                                       
+                        Ray ray,
+                        vector<float>& side_from,                             
+                        vector<float>& vert_from)         
+{                                                     
+  unsigned space_indx = row*mesh_dimx + col;
+  // Get material cross section                      
+  string mat_name;              
+  if (geom.inside_fuel(space_indx))                  
+    mat_name = "fuel";                               
+  else                                        
+    mat_name = "mod";                   
+  const Material& mat = materialSet.getMaterial(mat_name);
+  const vector<float>& sigt = mat.trans;                            
+  unsigned flux_indx;                   
+  float flux; // intermediate group flux
+  
+  // Loop on groups goes innermost
+  for (unsigned g=0; g<ngroups; ++g)
+  {
+    // Calc. cell center flux:      
+    flux_indx = ngroups * space_indx + g;
+    flux = (source[flux_indx] + 2.0f * ray.mu / dx * side_from[g] +
+           2.0f * ray.eta / dx * vert_from[col * ngroups + g] ) / 
+           (sigt[g] + 2.0f * ray.mu / dx + 2.0f * ray.eta / dx);
+                                                                
+    // Calc flux of vertically next edge                        
+    vert_from[col*ngroups+g] = 2.0f * flux - vert_from[col*ngroups+g];
+                                        
+    // Calc flux on the side's next edge:                                     
+    side_from[g] = 2.0f * flux - side_from[g];                                
+                                                                              
+    // Add angular flux to total flux:                                     
+    // Factor of two from z symmetry                                       
+    fluxes[space_indx*ngroups+g] += ray.wgt * flux * 2.0f;                     
+  }                                                                        
+}
+void Solver2D::zeroScalarFlux() { fill(fluxes.begin(), fluxes.end(), 0.0f); }
+void Solver2D::setSource(unsigned indx, float src)
+{
+  if (indx < source.size()) source[indx] = src;
+  else cout << "warn: attempt to set source out of bounds" << endl;
+}
+void Solver2D::sweepSource()
+{
+  // Current direction cosines and ray weight:
+  unsigned row, col, g; // cell indices
+  unsigned ray_id; // enumeration of rays in octant
+  Ray ray;
+
+  // Zero flux out, then add in angular components back 
+  // piece by piece during the sweep
+  zeroScalarFlux();
+
+  // Temporary fluxes
+  vector<float> vertical_tmp(ngroups * mesh_dimx); // below when going up, above going down
+  vector<float> side_tmp(ngroups); // left when going right, right when going left
+
+  // quadrant 1
+  ray_id = 0;
+  while (quad.iterateOctant(ray))
+  {
+    /*   sweep this way              
+     *
+     *     /o/    
+     *      |            
+     *     / \
+     */
+    copy(bottom_fluxes_fwd.begin()+ray_id*stride,
+         bottom_fluxes_fwd.begin()+(ray_id+1)*stride,
+         vertical_tmp.begin()); // apply lower BC
+    for (row=0; row<mesh_dimx; ++row)
+    {
+      // Copy left boundary flux to lateral temporary fluxes
+      copy(left_fluxes_fwd.begin()+row*ngroups+ray_id*stride,
+           left_fluxes_fwd.begin()+(row+1)*ngroups+ray_id*stride,
+           side_tmp.begin());
+
+      // Sweep rightward
+      for (col=0; col<mesh_dimx; ++col)
+        processCell(row, col, ray, side_tmp, vertical_tmp);
+
+      // Save right edge flux to boundary flux
+      for (g=0; g<ngroups; ++g)
+        right_fluxes_fwd[ray_id*stride+row*ngroups+g] = side_tmp[g];
+    }
+    // Save top flux result to top boundary flux
+    copy(vertical_tmp.begin(),
+         vertical_tmp.begin()+stride,
+         top_fluxes_fwd.begin()+ray_id*stride);
+
+    /*   sweep this way              
+     *
+     *     \o\
+     *      |            
+     *     / \
+     */
+    copy(bottom_fluxes_bwd.begin()+ray_id*stride,
+         bottom_fluxes_bwd.begin()+(ray_id+1)*stride,
+         vertical_tmp.begin()); // apply lower BC
+    for (row=0; row<mesh_dimx; ++row)
+    {
+      // Copy right boundary flux to lateral temporary fluxes
+      copy(right_fluxes_fwd.begin()+row*ngroups+ray_id*stride,
+           right_fluxes_fwd.begin()+(row+1)*ngroups+ray_id*stride,
+           side_tmp.begin());
+
+      // Sweep leftward 
+      col = mesh_dimx;
+      while (col --> 0)
+        processCell(row, col, ray, side_tmp, vertical_tmp);
+
+      // Save left edge flux to boundary flux
+      for (g=0; g<ngroups; ++g)
+        left_fluxes_fwd[ray_id*stride+row*ngroups+g] = side_tmp[g];
+    }
+    // Save top flux result to top boundary flux
+    copy(vertical_tmp.begin(),
+         vertical_tmp.begin()+stride,
+         top_fluxes_bwd.begin()+ray_id*stride);
+
+    /*   sweep this way              
+     *
+     *      o 
+     *     \|\
+     *     / \
+     */
+    copy(top_fluxes_fwd.begin()+ray_id*stride,
+         top_fluxes_fwd.begin()+(ray_id+1)*stride,
+         vertical_tmp.begin()); // apply upper BC
+    row = mesh_dimx;
+    while (row --> 0)
+    {
+      // Copy left boundary flux to lateral temporary fluxes
+      copy(left_fluxes_bwd.begin()+row*ngroups+ray_id*stride,
+           left_fluxes_bwd.begin()+(row+1)*ngroups+ray_id*stride,
+           side_tmp.begin());
+
+      // Sweep rightward
+      for (col=0; col<mesh_dimx; ++col)
+        processCell(row, col, ray, side_tmp, vertical_tmp);
+
+      // Save right edge flux to boundary flux
+      for (g=0; g<ngroups; ++g)
+        right_fluxes_bwd[ray_id*stride+row*ngroups+g] = side_tmp[g];
+    }
+    // Save top flux result to top boundary flux
+    copy(vertical_tmp.begin(),
+         vertical_tmp.begin()+stride,
+         bottom_fluxes_fwd.begin()+ray_id*stride);
+
+    /*   sweep this way              
+     *
+     *      o 
+     *     /|/
+     *     / \
+     */
+    copy(top_fluxes_bwd.begin()+ray_id*stride,
+         top_fluxes_bwd.begin()+(ray_id+1)*stride,
+         vertical_tmp.begin()); // apply upper BC
+    row = mesh_dimx;
+    while (row --> 0)
+    {
+      // Copy left boundary flux to lateral temporary fluxes
+      copy(right_fluxes_bwd.begin()+row*ngroups+ray_id*stride,
+           right_fluxes_bwd.begin()+(row+1)*ngroups+ray_id*stride,
+           side_tmp.begin());
+
+      // Sweep rightward
+      col = mesh_dimx;
+      while (col --> 0)
+        processCell(row, col, ray, side_tmp, vertical_tmp);
+
+      // Save right edge flux to boundary flux
+      for (g=0; g<ngroups; ++g)
+        left_fluxes_bwd[ray_id*stride+row*ngroups+g] = side_tmp[g];
+    }
+    // Save top flux result to top boundary flux
+    copy(vertical_tmp.begin(),
+         vertical_tmp.begin()+stride,
+         bottom_fluxes_bwd.begin()+ray_id*stride);
+
+    ray_id++;
+  }
+}
+
+int main(int argc, char * argv[])
+{
+  // Get command line argument to input file
+  if (argc != 2)                                                   
+  {                                      
+    cerr << "Should pass a settings file as a command line argument" << endl;
+    exit(1);
+  }                 
+  string filename = argv[1];
+  RunSettings settings(filename);
+
+  Solver2D solver(settings);
+
+  // Do power iteration:
+  float k = 1.0;
+  float fissionSource=1.0f;
+  float oldFissionSource, fiss_quo;
+  solver.setFlatFlux();
+  for (unsigned n=0; n<settings.maxiter; ++n)
+  {
+    // recalculate source
+    solver.zeroSource();
+    solver.scatter();
+    oldFissionSource = fissionSource;
+    fissionSource = solver.fission(k);
+
+    // calculate k
+    fiss_quo = fissionSource / oldFissionSource;
+    k *= fiss_quo;
+    cout << "k = " << k << endl;
+
+    // check convergence
+    if (abs(fiss_quo-1.0f) < EPS) break;
+
+    solver.sweepSource();
+  }
+
+  solver.dumpFluxes("flux");
 }
