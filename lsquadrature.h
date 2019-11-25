@@ -16,8 +16,8 @@ enum MomType {EVEN, ODD};
 // Stores data for a given angular direction
 struct Ray
 {
-  double mu, eta, theta, wgt;
-  Ray(double mu_a, double eta_a, double theta_a, double wgt_a);
+  float mu, eta, theta, wgt;
+  Ray(float mu_a, float eta_a, float theta_a, float wgt_a);
   Ray();
 };
 
@@ -32,9 +32,9 @@ class LSQuadrature
   // Number of distinct cosines:
   unsigned n;
 
-  std::vector<double> mu; // available cosine
-  std::vector<double> weights; // 1D quadrature weights
-  std::vector<double> point_weights; // 3D quadrature weights
+  std::vector<float> mu; // available cosine
+  std::vector<float> weights; // 1D quadrature weights
+  std::vector<float> point_weights; // 3D quadrature weights
 
   // Map i,j,k indices into point weights.
   // This is a kinda hard combinatorial problem which is easily
@@ -55,7 +55,7 @@ class LSQuadrature
     LSQuadrature(unsigned na, MomType ma);
 
     // True until all points in the octant have been covered
-    bool iterateOctant(double& xi1, double& xi2, double& xi3, double& wgt);
+    bool iterateOctant(float& xi1, float& xi2, float& xi3, float& wgt);
     bool iterateOctant(Ray& ray);
 
     // Calculate number of unknowns per octant
