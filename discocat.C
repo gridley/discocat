@@ -18,22 +18,22 @@
 using namespace std; // I love cluttered namespaces!
 namespace fs = experimental::filesystem;
 
-constexpr float EPS = 1e-8f;
-constexpr float PI4 = M_PI * 4.0f;
+constexpr double EPS = 1e-8f;
+constexpr double PI4 = M_PI * 4.0f;
 
 // --- A geometry class for the pedagogical fuel assembly in 22.212 ---
 // This has been stripped down from my previous random ray solver.
 struct SquarePinGeom
 {
   unsigned mesh_dimx;
-  float mesh_dx;
+  double mesh_dx;
   array<unsigned, 6> index_endpoints;
 
   // Prescribed fuel dimensions:
-  static constexpr float pitch = 1.2;
-  static constexpr float assembly_width = 3.0 * pitch;
-  static constexpr float assembly_radius = assembly_width / 2.0;
-  static constexpr float pin_width = pitch / 3.0;
+  static constexpr double pitch = 1.2;
+  static constexpr double assembly_width = 3.0 * pitch;
+  static constexpr double assembly_radius = assembly_width / 2.0;
+  static constexpr double pin_width = pitch / 3.0;
 
   public:
     SquarePinGeom(unsigned mesh_dimx);
@@ -42,7 +42,7 @@ struct SquarePinGeom
 };
 SquarePinGeom::SquarePinGeom(unsigned mesh_dimx) :
   mesh_dimx(mesh_dimx),
-  mesh_dx(assembly_width / (float)mesh_dimx)
+  mesh_dx(assembly_width / (double)mesh_dimx)
 {
   if (mesh_dimx % 9 != 0)
   {
@@ -137,7 +137,7 @@ struct Material
   unsigned ngroups;
   bool fissile;
 
-  vector<float> trans, abs, nuscat, chi, nufiss;
+  vector<double> trans, abs, nuscat, chi, nufiss;
 
   static const array<const string, 3> xs_types;
   static const array<const string, 2> fiss_xs_types;
@@ -175,7 +175,7 @@ class FiniteMaterialSet
   vector<Material> materials;
   map<string, unsigned> material_map;
 
-  void loadVector(vector<float>& to_vec, fs::path infile);
+  void loadVector(vector<double>& to_vec, fs::path infile);
   static unsigned getMaterialCount(string libname);
   public:
 
@@ -183,7 +183,7 @@ class FiniteMaterialSet
 
     FiniteMaterialSet(string xslib, unsigned ngroups);
 };
-void FiniteMaterialSet::loadVector(vector<float>& to_vec, fs::path infile)
+void FiniteMaterialSet::loadVector(vector<double>& to_vec, fs::path infile)
 {
   // Checks correct number XS loaded
   unsigned loadCount = 0;
@@ -193,7 +193,7 @@ void FiniteMaterialSet::loadVector(vector<float>& to_vec, fs::path infile)
     cerr << "cannot load " << infile << endl;
     exit(1);
   }
-  float value;
+  double value;
   while (instream >> value)
   {
     to_vec[loadCount++] = value;
@@ -303,25 +303,25 @@ class Solver2D
   unsigned ngroups;
   unsigned mesh_dimx;
   unsigned stride; // stride in boundary array between different rays
-  float dx; // mesh spacing
-  vector<float> fluxes; // scalar flux
-  vector<float> source; // isotropic cell source
+  double dx; // mesh spacing
+  vector<double> fluxes; // scalar flux
+  vector<double> source; // isotropic cell source
 
   // boundary fluxes
-  vector<float> left_fluxes_fwd; // eta > 0
-  vector<float> left_fluxes_bwd; // eta < 0
-  vector<float> bottom_fluxes_fwd; // mu > 0
-  vector<float> bottom_fluxes_bwd; // mu < 0
-  vector<float> top_fluxes_fwd; // mu > 0
-  vector<float> top_fluxes_bwd; // mu < 0
-  vector<float> right_fluxes_fwd; // eta > 0
-  vector<float> right_fluxes_bwd; // eta < 0
+  vector<double> left_fluxes_fwd; // eta > 0
+  vector<double> left_fluxes_bwd; // eta < 0
+  vector<double> bottom_fluxes_fwd; // mu > 0
+  vector<double> bottom_fluxes_bwd; // mu < 0
+  vector<double> top_fluxes_fwd; // mu > 0
+  vector<double> top_fluxes_bwd; // mu < 0
+  vector<double> right_fluxes_fwd; // eta > 0
+  vector<double> right_fluxes_bwd; // eta < 0
 
   // Core S_n kernel
   void processCell(unsigned row, unsigned col,
                    Ray ray,
-                   vector<float>& side_from,
-                   vector<float>& vert_from);
+                   vector<double>& side_from,
+                   vector<double>& vert_from);
 
   public:
     Solver2D(RunSettings settings_a);
@@ -329,7 +329,7 @@ class Solver2D
     void zeroScalarFlux();
 
     // Sets the source in a group-cell index
-    void setSource(unsigned indx, float src);
+    void setSource(unsigned indx, double src);
 
      // Single fixed source sweep, return true if converged
     void sweepSource();
@@ -340,9 +340,11 @@ class Solver2D
     // Calculate scattering source and add to source
     void scatter();
 
+    void normalizeFlux();
+
     // Calculate fission source, and add to source. Returns integral
     // fission source
-    float fission(float k);
+    double fission(double k);
 
     // guess a flat flux
     void setFlatFlux();
@@ -371,6 +373,31 @@ Solver2D::Solver2D(RunSettings settings_a) :
   right_fluxes_bwd(stride * noct)
 {
 }
+void Solver2D::normalizeFlux()
+{
+  // calculate norm of flux:
+  double norm = 0.0f;
+  for (auto x: fluxes) norm += abs(x);
+
+  // divide volumetric fluxes by norm:
+  for (auto& x: fluxes) x /= norm;
+
+  // divide boundary fluxes by norm:
+  // (Case study of why C++ is better than Fortran)
+  vector<vector<double>*> reflist = {
+    &left_fluxes_fwd,
+    &left_fluxes_bwd,
+    &bottom_fluxes_fwd,
+    &bottom_fluxes_bwd,
+    &top_fluxes_fwd,
+    &top_fluxes_bwd,
+    &right_fluxes_fwd,
+    &right_fluxes_bwd };
+
+  for (auto ref: reflist)
+    for (auto& x: *ref)
+      x /= norm;
+}
 void Solver2D::zeroSource() { for (auto& x: source) x = 0.0f; }
 void Solver2D::setFlatFlux() { for (auto& x: fluxes) x = 1.0f; }
 void Solver2D::scatter()
@@ -383,7 +410,7 @@ void Solver2D::scatter()
     else
       mat_name = "mod";
     const Material& mat = materialSet.getMaterial(mat_name);
-    const vector<float>& scatmat = mat.nuscat;
+    const vector<double>& scatmat = mat.nuscat;
     for (unsigned g=0; g<ngroups; ++g)
     {
       source[ngroups * fsr + g] = 0.0f;
@@ -395,9 +422,9 @@ void Solver2D::scatter()
     }
   }
 } 
-float Solver2D::fission(float k)
+double Solver2D::fission(double k)
 {
-  float fissionSource = 0.0;
+  double fissionSource = 0.0;
   for (unsigned fsr=0; fsr<mesh_dimx*mesh_dimx; ++fsr)
   {
     string mat_name;
@@ -409,14 +436,14 @@ float Solver2D::fission(float k)
       continue;
     }
     const Material& mat = materialSet.getMaterial(mat_name); 
-    const vector<float>& nusigf = mat.nufiss;
-    const vector<float>& chi = mat.chi;
+    const vector<double>& nusigf = mat.nufiss;
+    const vector<double>& chi = mat.chi;
     // NOTE could be done more efficiently
     for (unsigned g=0; g<ngroups; ++g)
     {
       for (unsigned gprime=0; gprime<ngroups; ++gprime)
       {
-        float this_fiss = chi[g] * fluxes[ngroups * fsr + gprime] * nusigf[gprime] / k;
+        double this_fiss = chi[g] * fluxes[ngroups * fsr + gprime] * nusigf[gprime] / k;
         source[ngroups * fsr + g] += this_fiss / PI4;
         fissionSource += this_fiss;
       }
@@ -432,8 +459,8 @@ void Solver2D::dumpFluxes(string fname)
 }
 void inline Solver2D::processCell(unsigned row, unsigned col,                                       
                         Ray ray,
-                        vector<float>& side_from,                             
-                        vector<float>& vert_from)         
+                        vector<double>& side_from,                             
+                        vector<double>& vert_from)         
 {                                                     
   unsigned space_indx = row*mesh_dimx + col;
   // Get material cross section                      
@@ -443,9 +470,9 @@ void inline Solver2D::processCell(unsigned row, unsigned col,
   else                                        
     mat_name = "mod";                   
   const Material& mat = materialSet.getMaterial(mat_name);
-  const vector<float>& sigt = mat.trans;                            
+  const vector<double>& sigt = mat.trans;                            
   unsigned flux_indx;                   
-  float flux; // intermediate group flux
+  double flux; // intermediate group flux
   
   // Loop on groups goes innermost
   for (unsigned g=0; g<ngroups; ++g)
@@ -468,7 +495,7 @@ void inline Solver2D::processCell(unsigned row, unsigned col,
   }                                                                        
 }
 void Solver2D::zeroScalarFlux() { fill(fluxes.begin(), fluxes.end(), 0.0f); }
-void Solver2D::setSource(unsigned indx, float src)
+void Solver2D::setSource(unsigned indx, double src)
 {
   if (indx < source.size()) source[indx] = src;
   else cout << "warn: attempt to set source out of bounds" << endl;
@@ -485,8 +512,8 @@ void Solver2D::sweepSource()
   zeroScalarFlux();
 
   // Temporary fluxes
-  vector<float> vertical_tmp(ngroups * mesh_dimx); // below when going up, above going down
-  vector<float> side_tmp(ngroups); // left when going right, right when going left
+  vector<double> vertical_tmp(ngroups * mesh_dimx); // below when going up, above going down
+  vector<double> side_tmp(ngroups); // left when going right, right when going left
 
   // quadrant 1
   ray_id = 0;
@@ -630,9 +657,9 @@ int main(int argc, char * argv[])
   Solver2D solver(settings);
 
   // Do power iteration:
-  float k = 1.0;
-  float fissionSource=1.0f;
-  float oldFissionSource, fiss_quo;
+  double k = 1.0;
+  double fissionSource=1.0f;
+  double oldFissionSource, fiss_quo;
   solver.setFlatFlux();
   for (unsigned n=0; n<settings.maxiter; ++n)
   {

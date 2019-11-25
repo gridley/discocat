@@ -1,6 +1,6 @@
 #include "lsquadrature.h"
 
-Ray::Ray(float mu_a, float eta_a, float theta_a, float wgt_a) :
+Ray::Ray(double mu_a, double eta_a, double theta_a, double wgt_a) :
   mu(mu_a),
   eta(eta_a),
   theta(theta_a),
@@ -35,7 +35,7 @@ unsigned LSQuadrature::nOct()
 }
 
 
-bool LSQuadrature::iterateOctant(float& xi1, float& xi2, float& xi3, float& wgt)
+bool LSQuadrature::iterateOctant(double& xi1, double& xi2, double& xi3, double& wgt)
 {
   if (j == n/2-i)
   {
