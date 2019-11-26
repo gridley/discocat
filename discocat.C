@@ -430,10 +430,12 @@ void Solver2D::homogenizeCells()
           unsigned fine_j = min_y + ii;
           unsigned fine_indx = fine_i * mesh_dimx + fine_j;
 
-          if (geom.inside_fuel(fine_i, fine_j))
-            Material& thismat = materialSet.getMaterial("fuel");
+          string mat_name;
+          if (geom.inside_fuel(fine_indx))  
+            mat_name = "fuel";
           else
-            Material& thismat = materialSet.getMaterial("mod");
+            mat_name = "mod";
+          const Material& thismat = materialSet.getMaterial(mat_name);
 
           // loop over groups
           for (unsigned g=0; g<ngroups; ++g)
@@ -442,7 +444,8 @@ void Solver2D::homogenizeCells()
             groupflux_integral[g] += groupflux;
             mat.diff[g] += groupflux / (3.0f * thismat.trans[g]);
             mat.trans[g] += groupflux * thismat.trans[g];
-            mat.nufiss[g] += groupflux * thismat. // TODO
+            if (mat.fissile)
+              mat.nufiss[g] += groupflux * thismat.nufiss[g];
           }
         }
 
@@ -739,6 +742,8 @@ int main(int argc, char * argv[])
   solver.setFlatFlux();
   for (unsigned n=0; n<settings.maxiter; ++n)
   {
+    // solver.normalizeFlux();
+
     // recalculate source
     solver.zeroSource();
     solver.scatter();
@@ -752,7 +757,6 @@ int main(int argc, char * argv[])
 
     // check convergence
     if (abs(fiss_quo-1.0) < EPS) break;
-
     solver.sweepSource();
   }
 
