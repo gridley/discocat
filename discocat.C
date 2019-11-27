@@ -499,7 +499,7 @@ void Solver2D::homogenizeCells()
             // For the scattering matrix, the columns are homogenized
             // according to the flux
             for (unsigned gprime=0; gprime<ngroups; ++gprime)
-              mat.nuscat[g*ngroups+gprime] += groupflux * thismat.nuscat[g*ngroups+gprime];
+              mat.nuscat[gprime*ngroups+g] += groupflux * thismat.nuscat[gprime*ngroups+g];
           }
         }
 
@@ -510,7 +510,7 @@ void Solver2D::homogenizeCells()
         mat.abs[g] /= groupflux_integral[g];
         mat.nufiss[g] /= groupflux_integral[g];
         for (unsigned gprime=0; gprime<ngroups; ++gprime)
-          mat.nuscat[g*ngroups+gprime] /= groupflux_integral[g];
+          mat.nuscat[gprime*ngroups+g] /= groupflux_integral[g];
       }
     }
 
@@ -838,7 +838,7 @@ void Solver2D::sweepSource()
   while (quad.iterateOctant(ray))
   {
     /*   sweep this way              
-     *
+     *  (definitely not a dab)
      *     /o/    
      *      |            
      *     / \
