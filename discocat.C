@@ -18,7 +18,11 @@
 using namespace std; // I love cluttered namespaces!
 namespace fs = experimental::filesystem;
 
-constexpr float EPS = 1e-8f;
+// Using Eigen for the diffusion solves to save some coding
+// Also, dense b/c it's not even worth going sparse w/ a 9x9
+#include "Eigen/Dense"
+
+constexpr float EPS = 1e-12f;
 constexpr float PI4 = M_PI * 4.0;
 
 // --- A geometry class for the pedagogical fuel assembly in 22.212 ---
@@ -31,7 +35,7 @@ struct SquarePinGeom
 
   // Prescribed fuel dimensions:
   static constexpr float pitch = 1.2;
-  static constexpr float assembly_width = 3.0 * pitch;
+  static constexpr float assembly_width = 3.0f * pitch;
   static constexpr float assembly_radius = assembly_width / 2.0;
   static constexpr float pin_width = pitch / 3.0;
 
@@ -146,6 +150,7 @@ struct Material
   public:
     Material(unsigned ngroups, bool fissile = false);
     void setFissile();
+    void setDiffusion();
 
     // useful for homogenization
     void zeroEntries();
@@ -169,6 +174,11 @@ void Material::setFissile()
   chi.resize(ngroups);
   nufiss.resize(ngroups);
 }
+void Material::setDiffusion()
+{
+  diffusion = true;
+  diff.resize(ngroups);
+}
 void Material::zeroEntries()
 {
   fill(trans.begin(), trans.end(), 0.0f);
@@ -177,6 +187,33 @@ void Material::zeroEntries()
   fill(chi.begin(), chi.end(), 0.0f);
   fill(nufiss.begin(), nufiss.end(), 0.0f);
   fill(diff.begin(), diff.end(), 0.0f);
+}
+// Print material nicely:
+ostream& operator<<(ostream& os, const Material& mat)
+{
+  os << "Material definition" << endl;
+  os << "-------------------" << endl;
+  os << "Abs. xs:" << endl;
+  for (auto x: mat.abs) os << x << " ";
+  os << endl;
+  os << "Nuscat matrix:" << endl;
+  for (unsigned g=0; g<mat.ngroups; ++g)
+  {
+    for (unsigned gp=0; gp<mat.ngroups; ++gp)
+      os << mat.nuscat[mat.ngroups*g+gp] << " ";
+    os << endl;
+  }
+  os << endl;
+  os << "chi:" << endl;
+  for (auto x: mat.chi ) os << x << " ";
+  os << endl;
+  os << "nufiss:" << endl;
+  for (auto x: mat.nufiss) os << x << " ";
+  os << endl;
+  os << "diff coeff:" << endl;
+  for (auto x: mat.nufiss) os << x << " ";
+  os << endl;
+  return os;
 }
 
 // OK, so, everything representible on a computer is finite, so IDK why
@@ -339,6 +376,7 @@ class Solver2D
 
   // stuff for the built-in diffusion solver
   vector<float> diffusion_fluxes;
+  vector<float> diffusion_source;
   vector<Material> homogenized_materials;
 
   public:
@@ -364,13 +402,17 @@ class Solver2D
     // fission source
     float fission(float k);
 
-    // guess a flat flux
-    void setFlatFlux();
+    // guess a flat fission source
+    void setFlatSource();
 
     void zeroSource();
 
     // homogenize materials in each unit cell for diffusion solve
     void homogenizeCells();
+
+    void diffusion_scatter();
+    float diffusion_fission();
+    void solveCoarseDiffusion();
 };
 Solver2D::Solver2D(RunSettings settings_a) :
   settings(settings_a),
@@ -395,7 +437,13 @@ Solver2D::Solver2D(RunSettings settings_a) :
   diffusion_fluxes(9 * ngroups),
   homogenized_materials(9, ngroups)
 {
-  for (auto& mat: homogenized_materials) mat.setFissile();
+  for (auto& mat: homogenized_materials)
+  {
+    // Assume homogenized materials store both a diffusion coefficient
+    // and fission data by default
+    mat.setFissile();
+    mat.setDiffusion();
+  }
 }
 void Solver2D::homogenizeCells()
 {
@@ -443,14 +491,127 @@ void Solver2D::homogenizeCells()
             float groupflux = fluxes[ngroups*(i * mesh_dimx + j) + g];
             groupflux_integral[g] += groupflux;
             mat.diff[g] += groupflux / (3.0f * thismat.trans[g]);
-            mat.trans[g] += groupflux * thismat.trans[g];
-            if (mat.fissile)
+            mat.abs[g] += groupflux * thismat.abs[g];
+            if (thismat.fissile)
               mat.nufiss[g] += groupflux * thismat.nufiss[g];
+
+            // For the scattering matrix, the columns are homogenized
+            // according to the flux
+            for (unsigned gprime=0; gprime<ngroups; ++gprime)
+              mat.nuscat[g*ngroups+gprime] += groupflux * thismat.nuscat[g*ngroups+gprime];
           }
         }
 
       // Now divide by flux integrals on each group constant
+      for (unsigned g=0; g<ngroups; ++g)
+      {
+        mat.diff[g] /= groupflux_integral[g];
+        mat.abs[g] /= groupflux_integral[g];
+        mat.nufiss[g] /= groupflux_integral[g];
+        for (unsigned gprime=0; gprime<ngroups; ++gprime)
+          mat.nuscat[g*ngroups+gprime] /= groupflux_integral[g];
+      }
     }
+
+  // DBG print out obtained homogenized materials
+  // for (auto& mat: homogenized_materials)
+  //   cout << mat << endl;
+}
+void Solver2D::solveCoarseDiffusion()
+{
+  // guess flux to fission group
+  constexpr unsigned nx = 3;
+  constexpr unsigned ny = 3;
+  constexpr unsigned n = nx * ny;
+
+  // area of each pin cell
+  float cell_width = geom.assembly_width / 3.0f;
+  float cell_area = cell_width * cell_width;
+
+  // Create diffusion matrices for each group (row major)
+  vector<Eigen::Matrix<float,n,n>> diff_matrices(ngroups);
+  for (unsigned g=0; g<ngroups; ++g)
+    diff_matrices[g] = Eigen::Matrix<float,n,n>::Zero();
+
+  // Create each matrix
+  for (unsigned g=0; g<ngroups; ++g)
+  {
+    Eigen::Matrix<float,n,n>& mat = diff_matrices[g];
+    for (unsigned i=0; i<ny; ++i)
+      for (unsigned j=0; j<nx; ++j)
+      {
+        // get neighbor indices
+        unsigned me = i * nx + j;
+        unsigned left = me-1;
+        unsigned right = me+1;
+        unsigned top = me + nx;
+        unsigned bottom = me - nx;
+
+        // handle boundary conditions
+        if (j == 0) left += nx;
+        if (j == nx-1) right -= nx;
+        if (i == 0) bottom += n;
+        if (i == ny-1) top -= n;
+
+        // calculate effective diffusion coefficients
+        float dthis, dtop, dleft, dright, dbottom;
+        dthis = homogenized_materials[me].diff[g];
+        dtop = homogenized_materials[top].diff[g];
+        dleft = homogenized_materials[left].diff[g];
+        dright = homogenized_materials[right].diff[g];
+        dbottom = homogenized_materials[bottom].diff[g];
+
+        dtop *= 2.0f * dthis / (dtop + dthis);
+        dleft *= 2.0f * dthis / (dleft + dthis);
+        dright *= 2.0f * dthis / (dright + dthis);
+        dbottom *= 2.0f * dthis / (dbottom + dthis);
+
+        // put diffusion entries to matrix
+        mat(me,me) += dtop + dleft + dright + dbottom;
+        mat(me,left) -= left;
+        mat(me,right) -= right;
+        mat(me,top) -= top;
+        mat(me,bottom) -= bottom;
+
+        // Diffusion stuff needs to be divided by cell area
+        for (auto col: {me, left, right, top, bottom}) mat(me,col) /= cell_area;
+
+        // add removal coefficient to diagonal
+        mat(me,me) += homogenized_materials[me].abs[g];
+      }
+  }
+
+  // Pre-calculate some matrix decompositions
+  vector<Eigen::ColPivHouseholderQR<Eigen::Matrix<float,n,n>>> diff_qrs;
+  for (auto& m: diff_matrices)
+    diff_qrs.emplace_back(m);
+
+  // check for rank deficiency. Should work with this factorization anyways tho
+  for (unsigned g=0; g<ngroups; ++g)
+  {
+    if (diff_qrs[g].rank() < n)
+    {
+      cout << "Warning: group " << g << " has a rank deficient matrix" << endl;
+      cout << diff_qrs[g].rank() << endl << endl;
+    }
+  }
+
+  // solve multigroup diffusion using power iteration
+  fill(diffusion_fluxes.begin(), diffusion_fluxes.end(), 1.0f);
+  float oldFissionSource, fissionSource, fiss_quo, k;
+  k = 1.0f;
+  for (unsigned n=0; n<settings.maxiter; ++n)
+  {
+    // calculate k
+    k *= fiss_quo;
+    cout << "\r" << "k = " << k << "   " << "(" << n+1 << "/" <<
+      settings.maxiter << ")" << flush;
+    if (abs(fiss_quo-1.0f) < EPS)
+    {
+      cout << endl << "k convergence detected. stopping" << endl;
+      break;
+    }
+  }
 }
 void Solver2D::normalizeFlux()
 {
@@ -477,8 +638,15 @@ void Solver2D::normalizeFlux()
     for (auto& x: *ref)
       x /= norm;
 }
-void Solver2D::zeroSource() { for (auto& x: source) x = 0.0; }
-void Solver2D::setFlatFlux() { for (auto& x: fluxes) x = 1.0; }
+void Solver2D::zeroSource() { for (auto& x: source) x = 0.0f; }
+void Solver2D::setFlatSource()
+{
+  // Set source to be only in top fission group
+  for (unsigned i=0; i < mesh_dimx*mesh_dimx; ++i)
+    for (unsigned g=0; g<ngroups; ++g)
+      if (g==0)
+        source[i * ngroups] = 1.0f;
+}
 void Solver2D::scatter()
 {
   for (unsigned fsr=0; fsr<mesh_dimx*mesh_dimx; ++fsr)
@@ -503,7 +671,7 @@ void Solver2D::scatter()
 } 
 float Solver2D::fission(float k)
 {
-  float fissionSource = 0.0;
+  float fissionSource = 0.0f;
   for (unsigned fsr=0; fsr<mesh_dimx*mesh_dimx; ++fsr)
   {
     string mat_name;
@@ -558,22 +726,22 @@ void inline Solver2D::processCell(unsigned row, unsigned col,
   {
     // Calc. cell center flux:      
     flux_indx = ngroups * space_indx + g;
-    flux = (source[flux_indx] + 2.0 * ray.mu / dx * side_from[g] +
-           2.0 * ray.eta / dx * vert_from[col * ngroups + g] ) / 
-           (sigt[g] + 2.0 * ray.mu / dx + 2.0 * ray.eta / dx);
+    flux = (dx*source[flux_indx] + 2.0f * ray.mu * side_from[g] +
+           2.0f * ray.eta * vert_from[col * ngroups + g] ) / 
+           (dx * sigt[g] + 2.0f * ray.mu + 2.0f * ray.eta);
                                                                 
     // Calc flux of vertically next edge                        
-    vert_from[col*ngroups+g] = 2.0 * flux - vert_from[col*ngroups+g];
+    vert_from[col*ngroups+g] = 2.0f * flux - vert_from[col*ngroups+g];
                                         
     // Calc flux on the side's next edge:                                     
-    side_from[g] = 2.0 * flux - side_from[g];                                
+    side_from[g] = 2.0f * flux - side_from[g];                                
                                                                               
     // Add angular flux to total flux:                                     
     // Factor of two from z symmetry                                       
-    fluxes[space_indx*ngroups+g] += ray.wgt * flux * 2.0;                     
+    fluxes[flux_indx] += ray.wgt * flux * 2.0f;                     
   }                                                                        
 }
-void Solver2D::zeroScalarFlux() { fill(fluxes.begin(), fluxes.end(), 0.0); }
+void Solver2D::zeroScalarFlux() { fill(fluxes.begin(), fluxes.end(), 0.0f); }
 void Solver2D::setSource(unsigned indx, float src)
 {
   if (indx < source.size()) source[indx] = src;
@@ -739,26 +907,38 @@ int main(int argc, char * argv[])
   float k = 1.0;
   float fissionSource=1.0;
   float oldFissionSource, fiss_quo;
-  solver.setFlatFlux();
+  solver.setFlatSource();
+  solver.sweepSource();
   for (unsigned n=0; n<settings.maxiter; ++n)
   {
-    // solver.normalizeFlux();
-
-    // recalculate source
+    solver.normalizeFlux();
     solver.zeroSource();
     solver.scatter();
-    oldFissionSource = fissionSource;
+    oldFissionSource = solver.fission(k);
+    solver.sweepSource();
+
+    solver.zeroSource();
+    solver.scatter();
     fissionSource = solver.fission(k);
 
     // calculate k
     fiss_quo = fissionSource / oldFissionSource;
     k *= fiss_quo;
-    cout << "k = " << k << endl;
-
-    // check convergence
-    if (abs(fiss_quo-1.0) < EPS) break;
-    solver.sweepSource();
+    cout << "\r" << "k = " << k << "   " << "(" << n+1 << "/" <<
+      settings.maxiter << ")" << flush;
+    if (abs(fiss_quo-1.0f) < EPS)
+    {
+      cout << endl << "k convergence detected. stopping" << endl;
+      break;
+    }
   }
+  cout << endl;
+
+  // Homogenize group constants for diffusion solve:
+  solver.homogenizeCells();
+
+  cout << "Diffusion solve:" << endl;
+  solver.solveCoarseDiffusion();
 
   solver.dumpFluxes("flux");
 }

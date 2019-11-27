@@ -1,5 +1,6 @@
-FLAGS_DBG = -g -O0 -lstdc++fs -fstack-protector
-FLAGS_OPT = -O4 -lstdc++fs -ffast-math
+INC_FLAGS = -lstdc++fs -I/usr/include/eigen3
+FLAGS_DBG = -g -O0 -fstack-protector -Wall $(INC_FLAGS)
+FLAGS_OPT = -O4 -ffast-math $(INC_FLAGS)
 FLAGS = $(FLAGS_OPT)
 main: discocat.C lsquadrature
 	g++ discocat.C lsquadrature.o $(FLAGS)

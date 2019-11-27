@@ -1,6 +1,6 @@
 xslibrary xslib10g
-mesh_dimx 99
+mesh_dimx 216
 ngroups 10
-s_n 4
+s_n 16
 quadrature_type EVEN
 maxiter 3000
