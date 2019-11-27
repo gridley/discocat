@@ -407,11 +407,11 @@ class Solver2D
 
     void zeroSource();
 
-    // homogenize materials in each unit cell for diffusion solve
+    // DIFFUSION SHI
     void homogenizeCells();
-
-    void diffusion_scatter();
-    float diffusion_fission();
+    void normalizeDiffusionFlux();
+    void diffusionScatter();
+    float diffusionFission(float k);
     void solveCoarseDiffusion();
 };
 Solver2D::Solver2D(RunSettings settings_a) :
@@ -435,6 +435,7 @@ Solver2D::Solver2D(RunSettings settings_a) :
   right_fluxes_fwd(stride * noct),
   right_fluxes_bwd(stride * noct),
   diffusion_fluxes(9 * ngroups),
+  diffusion_source(9 * ngroups),
   homogenized_materials(9, ngroups)
 {
   for (auto& mat: homogenized_materials)
@@ -488,7 +489,7 @@ void Solver2D::homogenizeCells()
           // loop over groups
           for (unsigned g=0; g<ngroups; ++g)
           {
-            float groupflux = fluxes[ngroups*(i * mesh_dimx + j) + g];
+            float groupflux = fluxes[ngroups*fine_indx + g];
             groupflux_integral[g] += groupflux;
             mat.diff[g] += groupflux / (3.0f * thismat.trans[g]);
             mat.abs[g] += groupflux * thismat.abs[g];
@@ -568,10 +569,10 @@ void Solver2D::solveCoarseDiffusion()
 
         // put diffusion entries to matrix
         mat(me,me) += dtop + dleft + dright + dbottom;
-        mat(me,left) -= left;
-        mat(me,right) -= right;
-        mat(me,top) -= top;
-        mat(me,bottom) -= bottom;
+        mat(me,left) -= dleft;
+        mat(me,right) -= dright;
+        mat(me,top) -= dtop;
+        mat(me,bottom) -= dbottom;
 
         // Diffusion stuff needs to be divided by cell area
         for (auto col: {me, left, right, top, bottom}) mat(me,col) /= cell_area;
@@ -581,7 +582,7 @@ void Solver2D::solveCoarseDiffusion()
       }
   }
 
-  // Pre-calculate some matrix decompositions
+  // Pre-calculate some pivoted QR decompositions
   vector<Eigen::ColPivHouseholderQR<Eigen::Matrix<float,n,n>>> diff_qrs;
   for (auto& m: diff_matrices)
     diff_qrs.emplace_back(m);
@@ -602,7 +603,31 @@ void Solver2D::solveCoarseDiffusion()
   k = 1.0f;
   for (unsigned n=0; n<settings.maxiter; ++n)
   {
+    normalizeDiffusionFlux();
+
+    fill(diffusion_source.begin(), diffusion_source.end(), 0.0f);
+    diffusionScatter();
+    oldFissionSource = diffusionFission(k);
+
+    // Update fluxes, given the previously calculated source
+    Eigen::Matrix<float, 9, 1> rhs, newflux;
+
+    // Loop over groups, constructing RHS and solving for new flux
+    for (unsigned g=0; g<ngroups; ++g)
+    {
+      for (unsigned i=0; i<9; ++i)
+        rhs(i) = diffusion_source[i*ngroups+g];
+      newflux = diff_qrs[g].solve(rhs);
+      for (unsigned i=0; i<9; ++i)
+        diffusion_fluxes[i] = newflux(i);
+    }
+
+    fill(diffusion_source.begin(), diffusion_source.end(), 0.0f);
+    diffusionScatter();
+    fissionSource = diffusionFission(k);
+
     // calculate k
+    fiss_quo = fissionSource / oldFissionSource;
     k *= fiss_quo;
     cout << "\r" << "k = " << k << "   " << "(" << n+1 << "/" <<
       settings.maxiter << ")" << flush;
@@ -612,6 +637,14 @@ void Solver2D::solveCoarseDiffusion()
       break;
     }
   }
+  cout << endl;
+  // for (auto x: diffusion_fluxes) cout << x << endl;
+}
+void Solver2D::normalizeDiffusionFlux()
+{
+  float norm = 0.0f;
+  for (auto x: diffusion_fluxes) norm += abs(x);
+  for (auto& x: diffusion_fluxes) x /= norm;
 }
 void Solver2D::normalizeFlux()
 {
@@ -669,6 +702,23 @@ void Solver2D::scatter()
     }
   }
 } 
+void Solver2D::diffusionScatter()
+{
+  for (unsigned fsr=0; fsr<9; ++fsr)
+  {
+    const Material& mat = homogenized_materials[fsr];
+    const vector<float>& scatmat = mat.nuscat;
+    for (unsigned g=0; g<ngroups; ++g)
+    {
+      diffusion_source[ngroups * fsr + g] = 0.0;
+      for (unsigned gprime=0; gprime<ngroups; ++gprime)
+      {
+        diffusion_source[ngroups * fsr + g] += 
+          scatmat[g*ngroups + gprime] * diffusion_fluxes[ngroups * fsr + gprime];
+      }
+    }
+  }
+} 
 float Solver2D::fission(float k)
 {
   float fissionSource = 0.0f;
@@ -692,6 +742,27 @@ float Solver2D::fission(float k)
       {
         float this_fiss = chi[g] * fluxes[ngroups * fsr + gprime] * nusigf[gprime] / k;
         source[ngroups * fsr + g] += this_fiss / PI4;
+        fissionSource += this_fiss;
+      }
+    }
+  }
+  return fissionSource;
+}
+float Solver2D::diffusionFission(float k)
+{
+  float fissionSource = 0.0f;
+  for (unsigned fsr=0; fsr<9; ++fsr)
+  {
+    const Material& mat = homogenized_materials[fsr];
+    const vector<float>& nusigf = mat.nufiss;
+    const vector<float>& chi = mat.chi;
+    // NOTE could be done more efficiently
+    for (unsigned g=0; g<ngroups; ++g)
+    {
+      for (unsigned gprime=0; gprime<ngroups; ++gprime)
+      {
+        float this_fiss = chi[g] * diffusion_fluxes[ngroups * fsr + gprime] * nusigf[gprime] / k;
+        diffusion_source[ngroups * fsr + g] += this_fiss;
         fissionSource += this_fiss;
       }
     }

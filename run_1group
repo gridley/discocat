@@ -1,5 +1,5 @@
 xslibrary xslib1g
-mesh_dimx 495
+mesh_dimx 45
 ngroups 1
 s_n 8
 quadrature_type EVEN
