@@ -407,6 +407,8 @@ class Solver2D
 
     void zeroSource();
 
+    void printPeakingFactors();
+
     // DIFFUSION SHI
     void homogenizeCells();
     void normalizeDiffusionFlux();
@@ -812,6 +814,56 @@ void inline Solver2D::processCell(unsigned row, unsigned col,
     fluxes[flux_indx] += ray.wgt * flux * 2.0f;                     
   }                                                                        
 }
+void Solver2D::printPeakingFactors()
+{
+  // The assumption here is that the nu value is
+  // pretty much constant throughout the problem
+  float cornerFission, edgeFission;
+  cornerFission = 0.0f;
+  edgeFission = 0.0f;
+  unsigned cellwide = mesh_dimx / 3;
+
+  // get corner pin fission rate
+  for (unsigned i=0; i<cellwide; ++i)
+    for (unsigned j=0; j<cellwide; ++j)
+    {
+      unsigned fsr = i*mesh_dimx + j;
+      string mat_name;              
+      if (geom.inside_fuel(fsr))                  
+        mat_name = "fuel";                               
+      else                                        
+        mat_name = "mod";                   
+      const Material& mat = materialSet.getMaterial(mat_name);
+      if (not mat.fissile) continue;
+      const vector<float>& fiss = mat.nufiss;
+
+      for (unsigned g=0; g<ngroups; ++g)
+        cornerFission += fluxes[fsr*ngroups+g]*fiss[g];
+    }
+
+  // edge pin fission rate
+  for (unsigned i=0; i<cellwide; ++i)
+    for (unsigned j=cellwide; j<2*cellwide; ++j)
+    {
+      unsigned fsr = i*mesh_dimx + j;
+      string mat_name;              
+      if (geom.inside_fuel(fsr))                  
+        mat_name = "fuel";                               
+      else                                        
+        mat_name = "mod";                   
+      const Material& mat = materialSet.getMaterial(mat_name);
+      if (not mat.fissile) continue;
+      const vector<float>& fiss = mat.nufiss;
+
+      for (unsigned g=0; g<ngroups; ++g)
+        edgeFission += fluxes[fsr*ngroups+g]*fiss[g];
+    }
+
+  // get peaking factors:
+  float avg = (cornerFission + edgeFission)/2.0f;
+  cout << "Corner pin peaking factor is " << cornerFission/avg << endl;
+  cout << "Edge pin peaking factor is " << edgeFission/avg << endl;
+}
 void Solver2D::zeroScalarFlux() { fill(fluxes.begin(), fluxes.end(), 0.0f); }
 void Solver2D::setSource(unsigned indx, float src)
 {
@@ -1004,6 +1056,7 @@ int main(int argc, char * argv[])
     }
   }
   cout << endl;
+  solver.printPeakingFactors();
 
   // Homogenize group constants for diffusion solve:
   solver.homogenizeCells();
